@@ -1,13 +1,14 @@
 package config
 
 import (
-	"github.com/spf13/viper"
 	"log"
+
+	"github.com/spf13/viper"
 )
 
 var Config = viper.New()
 
-func init() {
+func Init() {
 	Config.SetConfigName("config")
 	Config.SetConfigType("yaml")
 	Config.AddConfigPath(".")
