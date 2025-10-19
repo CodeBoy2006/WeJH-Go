@@ -13,7 +13,10 @@ type CircuitBreaker struct {
 	SnapShot *sync.Map
 }
 
-func init() {
+func Init() {
+
+	Probe = NewLiveNessProbe(cbConfig.GetLiveNessConfig())
+
 	lb := LoadBalance{
 		zfLB:    &randomLB{},
 		oauthLB: &randomLB{},
