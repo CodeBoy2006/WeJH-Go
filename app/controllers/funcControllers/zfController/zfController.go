@@ -3,14 +3,17 @@ package zfController
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/gin-gonic/gin"
 	"time"
+
+	"github.com/gin-gonic/gin"
+
 	"wejh-go/app/apiException"
 	"wejh-go/app/services/funnelServices"
 	"wejh-go/app/services/sessionServices"
 	"wejh-go/app/services/userServices"
 	"wejh-go/app/utils"
 	"wejh-go/app/utils/circuitBreaker"
+	cbConfig "wejh-go/config/circuitBreaker"
 	"wejh-go/config/redis"
 )
 
@@ -21,44 +24,80 @@ type form struct {
 
 func GetClassTable(c *gin.Context) {
 	var postForm form
-	err := c.ShouldBindJSON(&postForm)
-	if err != nil {
+	if err := c.ShouldBindJSON(&postForm); err != nil {
 		apiException.AbortWithException(c, apiException.ParamError, err)
 		return
 	}
-
 	user, err := sessionServices.GetUserSession(c)
 	if err != nil {
 		apiException.AbortWithException(c, apiException.NotLogin, err)
 		return
 	}
 
+	hedge := cbConfig.GetLoadBalanceConfig().Hedge
+	if hedge.Enable {
+		hosts, loginType, err := circuitBreaker.CB.PickN(user.ZFPassword != "", user.OauthPassword != "", hedge.MaxParallel)
+		if err != nil {
+			apiException.AbortWithError(c, err)
+			return
+		}
+		ret, usedHost, err := funnelServices.GetClassTableHedged(user, postForm.Year, postForm.Term, hosts, loginType)
+		if err != nil {
+			userServices.DelPassword(err, user, string(loginType))
+			apiException.AbortWithError(c, err)
+			return
+		}
+		c.Header("X-Upstream-Api", usedHost)
+		c.Header("X-Login-Type", string(loginType))
+		utils.JsonSuccessResponse(c, ret)
+		return
+	}
+
+	// 兼容：非 hedge
 	api, loginType, err := circuitBreaker.CB.GetApi(user.ZFPassword != "", user.OauthPassword != "")
 	if err != nil {
 		apiException.AbortWithError(c, err)
 		return
 	}
-
 	result, err := funnelServices.GetClassTable(user, postForm.Year, postForm.Term, api, loginType)
 	if err != nil {
 		userServices.DelPassword(err, user, string(loginType))
 		apiException.AbortWithError(c, err)
 		return
 	}
+	c.Header("X-Upstream-Api", api)
+	c.Header("X-Login-Type", string(loginType))
 	utils.JsonSuccessResponse(c, result)
 }
 
 func GetScore(c *gin.Context) {
 	var postForm form
-	err := c.ShouldBindJSON(&postForm)
-	if err != nil {
+	if err := c.ShouldBindJSON(&postForm); err != nil {
 		apiException.AbortWithException(c, apiException.ParamError, err)
 		return
 	}
 	user, err := sessionServices.GetUserSession(c)
-
 	if err != nil {
 		apiException.AbortWithException(c, apiException.NotLogin, err)
+		return
+	}
+
+	hedge := cbConfig.GetLoadBalanceConfig().Hedge
+	if hedge.Enable {
+		hosts, loginType, err := circuitBreaker.CB.PickN(user.ZFPassword != "", user.OauthPassword != "", hedge.MaxParallel)
+		if err != nil {
+			apiException.AbortWithError(c, err)
+			return
+		}
+		ret, usedHost, err := funnelServices.GetScoreHedged(user, postForm.Year, postForm.Term, hosts, loginType)
+		if err != nil {
+			userServices.DelPassword(err, user, string(loginType))
+			apiException.AbortWithError(c, err)
+			return
+		}
+		c.Header("X-Upstream-Api", usedHost)
+		c.Header("X-Login-Type", string(loginType))
+		utils.JsonSuccessResponse(c, ret)
 		return
 	}
 
@@ -67,27 +106,45 @@ func GetScore(c *gin.Context) {
 		apiException.AbortWithError(c, err)
 		return
 	}
-
 	result, err := funnelServices.GetScore(user, postForm.Year, postForm.Term, api, loginType)
 	if err != nil {
 		userServices.DelPassword(err, user, string(loginType))
 		apiException.AbortWithError(c, err)
 		return
 	}
+	c.Header("X-Upstream-Api", api)
+	c.Header("X-Login-Type", string(loginType))
 	utils.JsonSuccessResponse(c, result)
 }
 
 func GetMidTermScore(c *gin.Context) {
 	var postForm form
-	err := c.ShouldBindJSON(&postForm)
-	if err != nil {
+	if err := c.ShouldBindJSON(&postForm); err != nil {
 		apiException.AbortWithException(c, apiException.ParamError, err)
 		return
 	}
 	user, err := sessionServices.GetUserSession(c)
-
 	if err != nil {
 		apiException.AbortWithException(c, apiException.NotLogin, err)
+		return
+	}
+
+	hedge := cbConfig.GetLoadBalanceConfig().Hedge
+	if hedge.Enable {
+		hosts, loginType, err := circuitBreaker.CB.PickN(user.ZFPassword != "", user.OauthPassword != "", hedge.MaxParallel)
+		if err != nil {
+			apiException.AbortWithError(c, err)
+			return
+		}
+		ret, usedHost, err := funnelServices.GetMidTermScoreHedged(user, postForm.Year, postForm.Term, hosts, loginType)
+		if err != nil {
+			userServices.DelPassword(err, user, string(loginType))
+			apiException.AbortWithError(c, err)
+			return
+		}
+		c.Header("X-Upstream-Api", usedHost)
+		c.Header("X-Login-Type", string(loginType))
+		utils.JsonSuccessResponse(c, ret)
 		return
 	}
 
@@ -96,27 +153,45 @@ func GetMidTermScore(c *gin.Context) {
 		apiException.AbortWithError(c, err)
 		return
 	}
-
 	result, err := funnelServices.GetMidTermScore(user, postForm.Year, postForm.Term, api, loginType)
 	if err != nil {
 		userServices.DelPassword(err, user, string(loginType))
 		apiException.AbortWithError(c, err)
 		return
 	}
+	c.Header("X-Upstream-Api", api)
+	c.Header("X-Login-Type", string(loginType))
 	utils.JsonSuccessResponse(c, result)
 }
 
 func GetExam(c *gin.Context) {
 	var postForm form
-	err := c.ShouldBindJSON(&postForm)
-	if err != nil {
+	if err := c.ShouldBindJSON(&postForm); err != nil {
 		apiException.AbortWithException(c, apiException.ParamError, err)
 		return
 	}
 	user, err := sessionServices.GetUserSession(c)
-
 	if err != nil {
 		apiException.AbortWithException(c, apiException.NotLogin, err)
+		return
+	}
+
+	hedge := cbConfig.GetLoadBalanceConfig().Hedge
+	if hedge.Enable {
+		hosts, loginType, err := circuitBreaker.CB.PickN(user.ZFPassword != "", user.OauthPassword != "", hedge.MaxParallel)
+		if err != nil {
+			apiException.AbortWithError(c, err)
+			return
+		}
+		ret, usedHost, err := funnelServices.GetExamHedged(user, postForm.Year, postForm.Term, hosts, loginType)
+		if err != nil {
+			userServices.DelPassword(err, user, string(loginType))
+			apiException.AbortWithError(c, err)
+			return
+		}
+		c.Header("X-Upstream-Api", usedHost)
+		c.Header("X-Login-Type", string(loginType))
+		utils.JsonSuccessResponse(c, ret)
 		return
 	}
 
@@ -125,13 +200,14 @@ func GetExam(c *gin.Context) {
 		apiException.AbortWithError(c, err)
 		return
 	}
-
 	result, err := funnelServices.GetExam(user, postForm.Year, postForm.Term, api, loginType)
 	if err != nil {
 		userServices.DelPassword(err, user, string(loginType))
 		apiException.AbortWithError(c, err)
 		return
 	}
+	c.Header("X-Upstream-Api", api)
+	c.Header("X-Login-Type", string(loginType))
 	utils.JsonSuccessResponse(c, result)
 }
 
@@ -158,12 +234,6 @@ func GetRoom(c *gin.Context) {
 		return
 	}
 
-	api, loginType, err := circuitBreaker.CB.GetApi(user.ZFPassword != "", user.OauthPassword != "")
-	if err != nil {
-		apiException.AbortWithError(c, err)
-		return
-	}
-
 	// 使用 Redis 缓存键，包含查询参数
 	cacheKey := fmt.Sprintf("room:%s:%s:%s:%s:%s:%s", postForm.Year, postForm.Term, postForm.Campus, postForm.Weekday, postForm.Week, postForm.Sections)
 
@@ -180,12 +250,40 @@ func GetRoom(c *gin.Context) {
 		}
 	}
 
-	result, err := funnelServices.GetRoom(user, postForm.Year, postForm.Term, postForm.Campus, postForm.Weekday, postForm.Week, postForm.Sections, api, loginType)
-	if err != nil {
-		userServices.DelPassword(err, user, string(loginType))
-		apiException.AbortWithError(c, err)
-		return
+	hedge := cbConfig.GetLoadBalanceConfig().Hedge
+	var result interface{}
+	var usedHost string
+	var loginType string
+
+	if hedge.Enable {
+		hosts, lt, err := circuitBreaker.CB.PickN(user.ZFPassword != "", user.OauthPassword != "", hedge.MaxParallel)
+		if err != nil {
+			apiException.AbortWithError(c, err)
+			return
+		}
+		result, usedHost, err = funnelServices.GetRoomHedged(user, postForm.Year, postForm.Term, postForm.Campus, postForm.Weekday, postForm.Week, postForm.Sections, hosts, lt)
+		loginType = string(lt)
+		if err != nil {
+			userServices.DelPassword(err, user, loginType)
+			apiException.AbortWithError(c, err)
+			return
+		}
+	} else {
+		api, lt, err := circuitBreaker.CB.GetApi(user.ZFPassword != "", user.OauthPassword != "")
+		if err != nil {
+			apiException.AbortWithError(c, err)
+			return
+		}
+		result, err = funnelServices.GetRoom(user, postForm.Year, postForm.Term, postForm.Campus, postForm.Weekday, postForm.Week, postForm.Sections, api, lt)
+		usedHost = api
+		loginType = string(lt)
+		if err != nil {
+			userServices.DelPassword(err, user, loginType)
+			apiException.AbortWithError(c, err)
+			return
+		}
 	}
+
 	// 将结果缓存到 Redis 中
 	if result != nil {
 		resultJson, _ := json.Marshal(result)
@@ -195,5 +293,8 @@ func GetRoom(c *gin.Context) {
 			return
 		}
 	}
+
+	c.Header("X-Upstream-Api", usedHost)
+	c.Header("X-Login-Type", loginType)
 	utils.JsonSuccessResponse(c, result)
 }

@@ -3,9 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"github.com/gin-contrib/cors"
-	"github.com/gin-gonic/gin"
-	"go.uber.org/zap"
 	"log"
 	"net/http"
 	"os/signal"
@@ -17,15 +14,25 @@ import (
 	"wejh-go/config/config"
 	"wejh-go/config/database"
 	"wejh-go/config/logger"
+	"wejh-go/config/redis"
 	"wejh-go/config/router"
 	"wejh-go/config/session"
+	"wejh-go/config/wechat"
+
+	"github.com/gin-contrib/cors"
+	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
 )
 
 func main() {
 	if err := logger.Init(); err != nil {
 		log.Fatal(err.Error())
 	}
+	redis.Init()
 	database.Init()
+	circuitBreaker.Init()
+	wechat.Init()
+
 	r := gin.Default()
 	r.Use(cors.Default())
 	r.Use(midwares.ErrHandler())

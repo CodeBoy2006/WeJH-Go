@@ -2,8 +2,11 @@ package funnelServices
 
 import (
 	"net/url"
+	"time"
+
 	"wejh-go/app/models"
 	"wejh-go/config/api/funnelApi"
+	cbConfig "wejh-go/config/circuitBreaker"
 )
 
 func genTermForm(u *models.User, year, term string, loginType funnelApi.LoginType) url.Values {
@@ -23,6 +26,8 @@ func genTermForm(u *models.User, year, term string, loginType funnelApi.LoginTyp
 	form.Add("term", term)
 	return form
 }
+
+// ---------- 单路版（保留兼容） ----------
 
 func GetClassTable(u *models.User, year, term, host string, loginType funnelApi.LoginType) (interface{}, error) {
 	form := genTermForm(u, year, term, loginType)
@@ -67,4 +72,40 @@ func BindPassword(u *models.User, year, term, host string, loginType funnelApi.L
 	form.Add("year", year)
 	form.Add("term", term)
 	return FetchHandleOfPost(form, host, funnelApi.ZFExam)
+}
+
+// ---------- Hedged 版 ----------
+
+func GetClassTableHedged(u *models.User, year, term string, hosts []string, loginType funnelApi.LoginType) (interface{}, string, error) {
+	form := genTermForm(u, year, term, loginType)
+	hedgeDelay := cbConfig.GetLoadBalanceConfig().Hedge.Delay
+	return FetchHandleOfPostHedged(form, hosts, funnelApi.ZFClassTable, hedgeDelay)
+}
+
+func GetScoreHedged(u *models.User, year, term string, hosts []string, loginType funnelApi.LoginType) (interface{}, string, error) {
+	form := genTermForm(u, year, term, loginType)
+	hedgeDelay := cbConfig.GetLoadBalanceConfig().Hedge.Delay
+	return FetchHandleOfPostHedged(form, hosts, funnelApi.ZFScore, hedgeDelay)
+}
+
+func GetMidTermScoreHedged(u *models.User, year, term string, hosts []string, loginType funnelApi.LoginType) (interface{}, string, error) {
+	form := genTermForm(u, year, term, loginType)
+	hedgeDelay := cbConfig.GetLoadBalanceConfig().Hedge.Delay
+	return FetchHandleOfPostHedged(form, hosts, funnelApi.ZFMidTermScore, hedgeDelay)
+}
+
+func GetExamHedged(u *models.User, year, term string, hosts []string, loginType funnelApi.LoginType) (interface{}, string, error) {
+	form := genTermForm(u, year, term, loginType)
+	hedgeDelay := cbConfig.GetLoadBalanceConfig().Hedge.Delay
+	return FetchHandleOfPostHedged(form, hosts, funnelApi.ZFExam, hedgeDelay)
+}
+
+func GetRoomHedged(u *models.User, year, term, campus, weekday, week, sections string, hosts []string, loginType funnelApi.LoginType) (interface{}, string, error) {
+	form := genTermForm(u, year, term, loginType)
+	form.Add("campus", campus)
+	form.Add("weekday", weekday)
+	form.Add("week", week)
+	form.Add("sections", sections)
+	hedgeDelay := cbConfig.GetLoadBalanceConfig().Hedge.Delay
+	return FetchHandleOfPostHedged(form, hosts, funnelApi.ZFRoom, hedgeDelay)
 }
