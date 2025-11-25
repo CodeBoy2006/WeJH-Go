@@ -21,7 +21,7 @@ type FunnelResponse struct {
 }
 
 // 对单个后端节点做一次「带 413 重试」的调用
-func singleHostRequest(host string, api funnelApi.FunnelApi, form url.Values) (FunnelResponse, error) {
+func singleHostRequest(ctx context.Context, host string, api funnelApi.FunnelApi, form url.Values) (FunnelResponse, error) {
 	f := fetch.Fetch{}
 	f.Init()
 
@@ -31,6 +31,13 @@ func singleHostRequest(host string, api funnelApi.FunnelApi, form url.Values) (F
 
 	// 保留原来最多 5 次、413 重试的语义
 	for i := 0; i < 5; i++ {
+		// 已经被上层取消，则直接退出
+		select {
+		case <-ctx.Done():
+			return FunnelResponse{}, ctx.Err()
+		default:
+		}
+
 		res, err = f.PostForm(host+string(api), form)
 		if err != nil {
 			return FunnelResponse{}, apiException.RequestError
@@ -56,7 +63,7 @@ func FetchHandleOfPost(form url.Values, host string, api funnelApi.FunnelApi) (i
 
 	// 非 ZF 接口：保持原来的串行逻辑
 	if !zfFlag {
-		rc, err := singleHostRequest(host, api, form)
+		rc, err := singleHostRequest(context.Background(), host, api, form)
 		if err != nil {
 			// 原逻辑：对调用异常统一视为 ServerError
 			return nil, apiException.ServerError
@@ -81,15 +88,20 @@ func FetchHandleOfPost(form url.Values, host string, api funnelApi.FunnelApi) (i
 
 	// 调用方通过 GetApi 传进来的 host 优先级最高，把它挪到列表最前面
 	if host != "" {
-		found := false
-		for _, h := range hosts {
+		idx := -1
+		for i, h := range hosts {
 			if h == host {
-				found = true
+				idx = i
 				break
 			}
 		}
-		if !found {
+
+		if idx == -1 {
+			// 原列表中没有这个 host，头插一份
 			hosts = append([]string{host}, hosts...)
+		} else if idx > 0 {
+			// 已存在：挪到最前面，避免重复
+			hosts = append([]string{host}, append(hosts[:idx], hosts[idx+1:]...)...)
 		}
 	}
 
@@ -124,7 +136,7 @@ func FetchHandleOfPost(form url.Values, host string, api funnelApi.FunnelApi) (i
 			default:
 			}
 
-			rc, err := singleHostRequest(h, api, form)
+			rc, err := singleHostRequest(ctx, h, api, form)
 
 			select {
 			case resultCh <- result{host: h, rc: rc, err: err}:
@@ -148,10 +160,11 @@ func FetchHandleOfPost(form url.Values, host string, api funnelApi.FunnelApi) (i
 	// - 413 视为该节点过载/异常，Fail 一次，继续等待其它节点
 	for r := range resultCh {
 		if r.err != nil {
-			// 网络 / 解析错误：认为节点异常
+			// 网络 / 解析错误 / ctx 取消：认为节点异常
 			circuitBreaker.CB.Fail(r.host, loginType)
 			if firstErr == nil {
-				firstErr = r.err
+				// 统一向上映射成 ServerError
+				firstErr = apiException.ServerError
 			}
 			continue
 		}
