@@ -1,10 +1,12 @@
 package circuitBreaker
 
 import (
-	"github.com/bytedance/gopkg/lang/fastrand"
 	"sync"
+
 	"wejh-go/app/apiException"
 	"wejh-go/config/api/funnelApi"
+
+	"github.com/bytedance/gopkg/lang/fastrand"
 )
 
 type LoadBalanceType int
@@ -13,11 +15,13 @@ const (
 	Random LoadBalanceType = iota
 )
 
+// LoadBalance 维护两套池：ZF / OAuth
 type LoadBalance struct {
 	zfLB    *randomLB
 	oauthLB *randomLB
 }
 
+// Pick 原有随机负载均衡逻辑（为了兼容）
 func (lb *LoadBalance) Pick(zfFlag, oauthFlag bool) (string, funnelApi.LoginType, error) {
 	oauthAvailable := oauthFlag && lb.oauthLB.isAvailable()
 	zfAvailable := zfFlag && lb.zfLB.isAvailable()
@@ -39,6 +43,25 @@ func (lb *LoadBalance) Pick(zfFlag, oauthFlag bool) (string, funnelApi.LoginType
 	return "", funnelApi.Unknown, apiException.NoApiAvailable
 }
 
+// List 返回当前可用后端节点的快照
+// - loginType 为 Oauth：返回 OAuth 池
+// - 其它（ZF / Unknown）：统一返回 ZF 池
+func (lb *LoadBalance) List(loginType funnelApi.LoginType) []string {
+	switch loginType {
+	case funnelApi.Oauth:
+		if lb.oauthLB == nil {
+			return nil
+		}
+		return lb.oauthLB.list()
+	default:
+		if lb.zfLB == nil {
+			return nil
+		}
+		return lb.zfLB.list()
+	}
+}
+
+// 在运行时添加节点
 func (lb *LoadBalance) Add(api string, loginType funnelApi.LoginType) {
 	if loginType == funnelApi.Oauth {
 		lb.oauthLB.Add(api)
@@ -47,6 +70,7 @@ func (lb *LoadBalance) Add(api string, loginType funnelApi.LoginType) {
 	}
 }
 
+// 在运行时移除节点
 func (lb *LoadBalance) Remove(api string, loginType funnelApi.LoginType) {
 	if loginType == funnelApi.Oauth {
 		lb.oauthLB.Remove(api)
@@ -78,14 +102,31 @@ func (b *randomLB) LoadBalance() LoadBalanceType {
 	return Random
 }
 
+// Pick：单次随机选择一个后端
 func (b *randomLB) Pick() string {
 	b.Lock()
 	defer b.Unlock()
+
 	if b.Size == 0 {
 		return ""
 	}
-	idx := fastrand.Intn(b.Size)
-	return b.Api[idx]
+	if b.Size == 1 {
+		return b.Api[0]
+	}
+	return b.Api[fastrand.Intn(b.Size)]
+}
+
+// list：返回当前后端列表的拷贝，供并发对冲使用
+func (b *randomLB) list() []string {
+	b.Lock()
+	defer b.Unlock()
+
+	if b.Size == 0 {
+		return nil
+	}
+	out := make([]string, b.Size)
+	copy(out, b.Api)
+	return out
 }
 
 func (b *randomLB) ReBalance(apis []string) {
@@ -104,6 +145,7 @@ func (b *randomLB) Add(api ...string) {
 func (b *randomLB) Remove(api string) {
 	b.Lock()
 	defer b.Unlock()
+
 	for i, s := range b.Api {
 		if s == api {
 			b.Api = append(b.Api[:i], b.Api[i+1:]...)
