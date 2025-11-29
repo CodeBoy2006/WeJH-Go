@@ -32,26 +32,38 @@ type FunnelResponse struct {
 	Data interface{} `json:"data"`
 }
 
-// 对单个后端节点做一次带 413 重试的调用
+// 对单个后端节点做一次调用：
+// - 默认只请求一次
+// - 如果返回 413（验证码错误），最多额外重试 4 次（总共 5 次）
 func singleHostRequest(ctx context.Context, host string, api funnelApi.FunnelApi, form url.Values) (FunnelResponse, error) {
 	f := fetch.Fetch{}
 	f.Init()
 
 	var rc FunnelResponse
+	var res []byte
+	var err error
 
-	// 已经被上层取消，则直接退出
-	select {
-	case <-ctx.Done():
-		return FunnelResponse{}, ctx.Err()
-	default:
-	}
+	// 最多 5 次重试，遇到 413（验证码错误）才继续重试
+	for i := 0; i < 5; i++ {
+		// 已经被上层取消，则直接退出
+		select {
+		case <-ctx.Done():
+			return FunnelResponse{}, ctx.Err()
+		default:
+		}
 
-	res, err := f.PostForm(host+string(api), form)
-	if err != nil {
-		return FunnelResponse{}, apiException.RequestError
-	}
-	if err = json.Unmarshal(res, &rc); err != nil {
-		return FunnelResponse{}, apiException.RequestError
+		res, err = f.PostForm(host+string(api), form)
+		if err != nil {
+			return FunnelResponse{}, apiException.RequestError
+		}
+		if err = json.Unmarshal(res, &rc); err != nil {
+			return FunnelResponse{}, apiException.RequestError
+		}
+
+		// 只有 413（验证码错误）时才继续下一次重试，其它 code 直接退出循环
+		if rc.Code != funnelCodeCaptchaFailed {
+			break
+		}
 	}
 
 	return rc, nil
