@@ -3,6 +3,7 @@ package funnelServices
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/url"
 	"strings"
 	"sync"
@@ -13,6 +14,17 @@ import (
 	"wejh-go/config/api/funnelApi"
 )
 
+// Funnel 协议中的业务返回码（与 funnel 端枚举保持一致）
+const (
+	funnelCodeSuccess        = 200 // 请求成功
+	funnelCodeInvalidArgs    = 410 // 参数错误
+	funnelCodeWrongPassword  = 412 // 密码错误
+	funnelCodeCaptchaFailed  = 413 // 验证码错误
+	funnelCodeSessionExpired = 414 // 缓存过期
+	funnelCodeOauthError     = 415 // Oauth / 统一登录缓存错误
+	funnelCodeOAuthNotUpdate = 416 // 统一密码未更新
+)
+
 // FunnelResponse 后端统一响应格式
 type FunnelResponse struct {
 	Code int         `json:"code" binding:"required"`
@@ -20,34 +32,26 @@ type FunnelResponse struct {
 	Data interface{} `json:"data"`
 }
 
-// 对单个后端节点做一次「带 413 重试」的调用
+// 对单个后端节点做一次带 413 重试的调用
 func singleHostRequest(ctx context.Context, host string, api funnelApi.FunnelApi, form url.Values) (FunnelResponse, error) {
 	f := fetch.Fetch{}
 	f.Init()
 
 	var rc FunnelResponse
-	var res []byte
-	var err error
 
-	// 保留原来最多 5 次、413 重试的语义
-	for i := 0; i < 5; i++ {
-		// 已经被上层取消，则直接退出
-		select {
-		case <-ctx.Done():
-			return FunnelResponse{}, ctx.Err()
-		default:
-		}
+	// 已经被上层取消，则直接退出
+	select {
+	case <-ctx.Done():
+		return FunnelResponse{}, ctx.Err()
+	default:
+	}
 
-		res, err = f.PostForm(host+string(api), form)
-		if err != nil {
-			return FunnelResponse{}, apiException.RequestError
-		}
-		if err = json.Unmarshal(res, &rc); err != nil {
-			return FunnelResponse{}, apiException.RequestError
-		}
-		if rc.Code != 413 {
-			break
-		}
+	res, err := f.PostForm(host+string(api), form)
+	if err != nil {
+		return FunnelResponse{}, apiException.RequestError
+	}
+	if err = json.Unmarshal(res, &rc); err != nil {
+		return FunnelResponse{}, apiException.RequestError
 	}
 
 	return rc, nil
@@ -63,21 +67,27 @@ func FetchHandleOfPost(form url.Values, host string, api funnelApi.FunnelApi) (i
 
 	// 非 ZF 接口：保持原来的串行逻辑
 	if !zfFlag {
+		// 非对冲场景用 Background 的 ctx，行为与旧实现一致
 		rc, err := singleHostRequest(context.Background(), host, api, form)
 		if err != nil {
-			// 原逻辑：对调用异常统一视为 ServerError
+			// 对调用异常统一视为 ServerError
 			return nil, apiException.ServerError
 		}
 
 		switch rc.Code {
-		case 200:
+		case funnelCodeSuccess:
 			return rc.Data, nil
-		case 413:
-			return nil, apiException.ServerError
-		case 412:
+
+		case funnelCodeWrongPassword:
+			// funnel 返回「密码错误」
 			return nil, apiException.NoThatPasswordOrWrong
-		case 416:
+
+		case funnelCodeOAuthNotUpdate:
+			// funnel 返回「统一密码未更新」
 			return nil, apiException.OAuthNotUpdate
+
+		// 410 / 413 / 414 / 415 以及其它未知 code：
+		// 统一视为服务侧异常，向上抛 ServerError
 		default:
 			return nil, apiException.ServerError
 		}
@@ -100,8 +110,8 @@ func FetchHandleOfPost(form url.Values, host string, api funnelApi.FunnelApi) (i
 			// 原列表中没有这个 host，头插一份
 			hosts = append([]string{host}, hosts...)
 		} else if idx > 0 {
-			// 已存在：挪到最前面，避免重复
-			hosts = append([]string{host}, append(hosts[:idx], hosts[idx+1:]...)...)
+			// 已存在：和第一个元素交换，避免额外分配
+			hosts[0], hosts[idx] = hosts[idx], hosts[0]
 		}
 	}
 
@@ -116,6 +126,7 @@ func FetchHandleOfPost(form url.Values, host string, api funnelApi.FunnelApi) (i
 		err  error
 	}
 
+	// 对冲用的 ctx：一旦某个节点拿到最终结果，cancel() 终止其它 goroutine 的后续工作
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -124,12 +135,18 @@ func FetchHandleOfPost(form url.Values, host string, api funnelApi.FunnelApi) (i
 
 	// 并发对冲
 	for _, h := range hosts {
-		h := h
 		wg.Add(1)
-		go func() {
+		go func(h string) {
 			defer wg.Done()
+			// 独立 goroutine 需要自己的 recover，避免撞穿 gin 的 Recovery
+			defer func() {
+				if r := recover(); r != nil {
+					// 保守起见，这里记一次 Fail，避免隐藏掉持续异常节点
+					circuitBreaker.CB.Fail(h, loginType)
+				}
+			}()
 
-			// 如果已经有其他节点成功了，尽量避免无意义请求
+			// 如果已经有其他节点成功了，可以尽量避免无意义请求
 			select {
 			case <-ctx.Done():
 				return
@@ -138,18 +155,19 @@ func FetchHandleOfPost(form url.Values, host string, api funnelApi.FunnelApi) (i
 
 			rc, err := singleHostRequest(ctx, h, api, form)
 
+			// 如果上层已经 cancel，不再阻塞在写 channel 上
 			select {
 			case resultCh <- result{host: h, rc: rc, err: err}:
 			case <-ctx.Done():
 				// 上层已经有结果了，丢弃即可
 			}
-		}()
+		}(h)
 	}
 
 	// 等所有协程结束后关闭通道
 	go func() {
+		defer close(resultCh)
 		wg.Wait()
-		close(resultCh)
 	}()
 
 	var firstErr error
@@ -157,10 +175,15 @@ func FetchHandleOfPost(form url.Values, host string, api funnelApi.FunnelApi) (i
 	// 竞争结果：
 	// - 第一个 200 直接返回数据，并标记该节点 Success
 	// - 第一个 412 / 416 属于用户态错误，也直接返回，不再等其它节点
-	// - 413 视为该节点过载/异常，Fail 一次，继续等待其它节点
+	// - 其它（410 / 413 / 414 / 415 / 未知）视作节点异常，Fail 一次，继续等待其它节点
 	for r := range resultCh {
 		if r.err != nil {
-			// 网络 / 解析错误 / ctx 取消：认为节点异常
+			// context.Canceled 表示其他节点已经成功，不认为该节点异常
+			if errors.Is(r.err, context.Canceled) {
+				continue
+			}
+
+			// 网络 / 解析错误等：认为节点异常
 			circuitBreaker.CB.Fail(r.host, loginType)
 			if firstErr == nil {
 				// 统一向上映射成 ServerError
@@ -170,33 +193,27 @@ func FetchHandleOfPost(form url.Values, host string, api funnelApi.FunnelApi) (i
 		}
 
 		switch r.rc.Code {
-		case 200:
+		case funnelCodeSuccess:
 			// 节点健康
 			circuitBreaker.CB.Success(r.host, loginType)
 			cancel()
 			return r.rc.Data, nil
 
-		case 412:
+		case funnelCodeWrongPassword:
 			// 密码错误：业务错误，节点本身是健康的
 			circuitBreaker.CB.Success(r.host, loginType)
 			cancel()
 			return nil, apiException.NoThatPasswordOrWrong
 
-		case 416:
-			// OAuth 未更新：同样是业务错误，节点健康
+		case funnelCodeOAuthNotUpdate:
+			// 统一密码未更新：业务错误，节点健康
 			circuitBreaker.CB.Success(r.host, loginType)
 			cancel()
 			return nil, apiException.OAuthNotUpdate
 
-		case 413:
-			// 统一视为该节点过载，触发熔断统计，继续等其它节点
-			circuitBreaker.CB.Fail(r.host, loginType)
-			if firstErr == nil {
-				firstErr = apiException.ServerError
-			}
-
+		// 410 / 413 / 414 / 415 以及其它未知 code
 		default:
-			// 其它错误码也视作节点异常
+			// 视作节点异常（或至少是该线路上的不可用状态），触发熔断统计，继续等其它节点
 			circuitBreaker.CB.Fail(r.host, loginType)
 			if firstErr == nil {
 				firstErr = apiException.ServerError

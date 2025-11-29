@@ -3,10 +3,9 @@ package circuitBreaker
 import (
 	"sync"
 
+	"github.com/bytedance/gopkg/lang/fastrand"
 	"wejh-go/app/apiException"
 	"wejh-go/config/api/funnelApi"
-
-	"github.com/bytedance/gopkg/lang/fastrand"
 )
 
 type LoadBalanceType int
@@ -27,6 +26,7 @@ func (lb *LoadBalance) Pick(zfFlag, oauthFlag bool) (string, funnelApi.LoginType
 	zfAvailable := zfFlag && lb.zfLB.isAvailable()
 
 	if oauthAvailable && zfAvailable {
+		// 双池都可用时，随机选择其一
 		if fastrand.Intn(100) > 50 {
 			return lb.oauthLB.Pick(), funnelApi.Oauth, nil
 		}
@@ -90,12 +90,13 @@ type loadBalance interface {
 
 type randomLB struct {
 	sync.Mutex
-	Api  []string
-	Size int
+	Api []string
 }
 
 func newRandomLB(apis []string) loadBalance {
-	return &randomLB{Api: apis, Size: len(apis)}
+	return &randomLB{
+		Api: apis,
+	}
 }
 
 func (b *randomLB) LoadBalance() LoadBalanceType {
@@ -107,13 +108,14 @@ func (b *randomLB) Pick() string {
 	b.Lock()
 	defer b.Unlock()
 
-	if b.Size == 0 {
+	size := len(b.Api)
+	if size == 0 {
 		return ""
 	}
-	if b.Size == 1 {
+	if size == 1 {
 		return b.Api[0]
 	}
-	return b.Api[fastrand.Intn(b.Size)]
+	return b.Api[fastrand.Intn(size)]
 }
 
 // list：返回当前后端列表的拷贝，供并发对冲使用
@@ -121,10 +123,11 @@ func (b *randomLB) list() []string {
 	b.Lock()
 	defer b.Unlock()
 
-	if b.Size == 0 {
+	size := len(b.Api)
+	if size == 0 {
 		return nil
 	}
-	out := make([]string, b.Size)
+	out := make([]string, size)
 	copy(out, b.Api)
 	return out
 }
@@ -132,14 +135,13 @@ func (b *randomLB) list() []string {
 func (b *randomLB) ReBalance(apis []string) {
 	b.Lock()
 	defer b.Unlock()
-	b.Api, b.Size = apis, len(apis)
+	b.Api = apis
 }
 
 func (b *randomLB) Add(api ...string) {
 	b.Lock()
 	defer b.Unlock()
 	b.Api = append(b.Api, api...)
-	b.Size = len(b.Api)
 }
 
 func (b *randomLB) Remove(api string) {
@@ -152,11 +154,10 @@ func (b *randomLB) Remove(api string) {
 			break
 		}
 	}
-	b.Size = len(b.Api)
 }
 
 func (b *randomLB) isAvailable() bool {
 	b.Lock()
 	defer b.Unlock()
-	return b.Size != 0
+	return len(b.Api) != 0
 }
